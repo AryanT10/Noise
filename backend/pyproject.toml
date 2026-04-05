@@ -1,0 +1,36 @@
+[project]
+name = "noise-backend"
+version = "0.1.0"
+description = "Noise — question-answering backend with LLM orchestration"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "python-dotenv>=1,<2",
+    "langchain>=0.3,<1",
+    "langchain-openai>=0.3,<1",
+    "langchain-google-genai>=2,<3",
+    "langchain-groq>=0.3,<1",
+    "langchain-community>=0.3,<1",
+    "langchain-text-splitters>=0.3,<1",
+    "langgraph>=0.3,<1",
+    "faiss-cpu>=1.9,<2",
+    "pypdf>=5,<6",
+    "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.25,<1",
+    "httpx>=0.28,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
