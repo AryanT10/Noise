@@ -1,18 +1,22 @@
 """Graph nodes — each function takes GraphState, returns a partial update."""
 
 import asyncio
+import re as _re
 
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.chains.llm import get_llm
 from app.graph.state import GraphState
 from app.logging import logger
 from app.models.schemas import Source, Snippet
+from app.tools.definitions import REASONING_TOOLS
 from app.tools.scraper import extract_page_text
 from app.tools.search import web_search
 
 NUM_SEARCH_RESULTS = 5
 NUM_PAGES_TO_SCRAPE = 3
+MAX_REASONING_ROUNDS = 2
 
 # ── Prompts ──────────────────────────────────────────────────
 
@@ -74,6 +78,24 @@ _SYNTHESIZE_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+# ── Phase 5: Reasoning node prompt ──────────────────────────
+
+_REASON_SYSTEM = (
+    "You are a research assistant deciding how to gather evidence for answering "
+    "a user question. You have access to the following tools:\n\n"
+    "- search_web: Search the internet for current information\n"
+    "- fetch_url: Get full text content from a specific URL\n"
+    "- retrieve_documents: Search the internal document store\n"
+    "- format_citations: Format sources into citations\n"
+    "- request_more_evidence: Ask for another gathering round if evidence is insufficient\n\n"
+    "Choose the most appropriate tool(s) for the question. Be strategic:\n"
+    "- For factual/current questions, use search_web\n"
+    "- For questions about internal/ingested content, use retrieve_documents\n"
+    "- Use fetch_url only when you need full content from a known URL\n"
+    "- Use request_more_evidence only if current evidence is clearly insufficient\n\n"
+    "You MUST call at least one data-gathering tool. Do not try to answer yourself."
+)
+
 
 # ── Node functions ───────────────────────────────────────────
 
@@ -99,6 +121,175 @@ async def analyze_question(state: GraphState) -> dict:
         return {
             "search_queries": [question],
             "errors": [*state.get("errors", []), f"analyze_question: {exc}"],
+        }
+
+
+# ── Phase 5: controlled tool-calling node ────────────────────
+
+
+async def reason_and_act(state: GraphState) -> dict:
+    """Reasoning node — uses LLM tool-calling to decide how to gather evidence.
+
+    The LLM chooses which tools to invoke (web search, doc retrieval, URL fetch).
+    Tool calls are executed in a single controlled round.  The graph caps the
+    total number of rounds at MAX_REASONING_ROUNDS to prevent runaway loops.
+    """
+    question = state["question"]
+    queries = state.get("search_queries", [question])
+    rounds = state.get("reasoning_rounds", 0)
+    prior_docs = state.get("retrieved_docs", [])
+    errors = list(state.get("errors", []))
+    tool_calls_log = list(state.get("tool_calls_made", []))
+
+    logger.info("Node [reason_and_act] round=%d", rounds + 1)
+
+    try:
+        llm = get_llm()
+        llm_with_tools = llm.bind_tools(REASONING_TOOLS)
+
+        # Build context from any prior-round docs
+        prior_text = ""
+        if prior_docs:
+            summaries = [f"  - {d['title']}: {d['text'][:200]}…" for d in prior_docs[:5]]
+            prior_text = "\nEvidence gathered so far:\n" + "\n".join(summaries)
+
+        messages = [
+            SystemMessage(content=_REASON_SYSTEM),
+            HumanMessage(
+                content=(
+                    f"Question: {question}\n"
+                    f"Suggested search queries: {', '.join(queries)}"
+                    f"{prior_text}"
+                )
+            ),
+        ]
+
+        response = await llm_with_tools.ainvoke(messages)
+
+        new_docs = list(prior_docs)
+        seen_urls = {d["url"] for d in new_docs}
+        needs_more = False
+
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                name = tc["name"]
+                args = tc["args"]
+                tool_calls_log.append({"tool": name, "args": args, "round": rounds + 1})
+                logger.info("Tool call: %s(%s)", name, str(args)[:100])
+
+                try:
+                    if name == "search_web":
+                        results = await web_search(
+                            args.get("query", queries[0]),
+                            num_results=NUM_SEARCH_RESULTS,
+                        )
+                        for r in results:
+                            if r["url"] not in seen_urls:
+                                seen_urls.add(r["url"])
+                                new_docs.append({
+                                    "title": r["title"],
+                                    "url": r["url"],
+                                    "text": r["snippet"],
+                                })
+
+                    elif name == "fetch_url":
+                        url = args.get("url", "")
+                        if url:
+                            text = await extract_page_text(url)
+                            if url not in seen_urls:
+                                seen_urls.add(url)
+                                new_docs.append({
+                                    "title": url,
+                                    "url": url,
+                                    "text": text or "",
+                                })
+                            else:
+                                # Upgrade existing snippet with full text
+                                for d in new_docs:
+                                    if d["url"] == url:
+                                        d["text"] = text or d["text"]
+                                        break
+
+                    elif name == "retrieve_documents":
+                        from app.retrieval.store import search as store_search
+
+                        chunks = store_search(args.get("query", question), k=5)
+                        for chunk in chunks:
+                            src = chunk.metadata.get("source", "internal")
+                            new_docs.append({
+                                "title": f"Internal: {src}",
+                                "url": src,
+                                "text": chunk.page_content[:2000],
+                            })
+
+                    elif name == "request_more_evidence":
+                        needs_more = True
+                        logger.info(
+                            "LLM requested more evidence: %s",
+                            args.get("reason", ""),
+                        )
+
+                    elif name == "format_citations":
+                        pass  # Formatting-only tool — no docs to gather
+
+                except Exception as exc:
+                    logger.warning("Tool %s failed: %s", name, exc)
+                    errors.append(f"tool {name}: {exc}")
+        else:
+            # No tool calls — fall back to basic web search with generated queries
+            logger.info("No tool calls from LLM — falling back to web search")
+            for query in queries[:2]:
+                try:
+                    results = await web_search(query, num_results=NUM_SEARCH_RESULTS)
+                    for r in results:
+                        if r["url"] not in seen_urls:
+                            seen_urls.add(r["url"])
+                            new_docs.append({
+                                "title": r["title"],
+                                "url": r["url"],
+                                "text": r["snippet"],
+                            })
+                except Exception as exc:
+                    errors.append(f"fallback search: {exc}")
+
+        # Enforce round cap
+        if needs_more and (rounds + 1) >= MAX_REASONING_ROUNDS:
+            needs_more = False
+            logger.info("Max reasoning rounds reached — proceeding with current evidence")
+
+        return {
+            "retrieved_docs": new_docs,
+            "tool_calls_made": tool_calls_log,
+            "reasoning_rounds": rounds + 1,
+            "needs_more_evidence": needs_more,
+            "errors": errors,
+        }
+
+    except Exception as exc:
+        logger.error("reason_and_act failed: %s", exc)
+        # Full fallback: basic web search
+        new_docs = list(prior_docs)
+        seen_urls = {d["url"] for d in new_docs}
+        for query in queries[:2]:
+            try:
+                results = await web_search(query, num_results=NUM_SEARCH_RESULTS)
+                for r in results:
+                    if r["url"] not in seen_urls:
+                        seen_urls.add(r["url"])
+                        new_docs.append({
+                            "title": r["title"],
+                            "url": r["url"],
+                            "text": r["snippet"],
+                        })
+            except Exception:
+                pass
+
+        return {
+            "retrieved_docs": new_docs,
+            "tool_calls_made": tool_calls_log,
+            "reasoning_rounds": rounds + 1,
+            "needs_more_evidence": False,
+            "errors": [*errors, f"reason_and_act: {exc}"],
         }
 
 
@@ -271,8 +462,7 @@ async def format_response(state: GraphState) -> dict:
     ]
 
     # Extract citation markers like [1], [2] from the draft
-    import re
-    citation_markers = sorted(set(re.findall(r"\[\d+\]", draft)))
+    citation_markers = sorted(set(_re.findall(r"\[\d+\]", draft)))
 
     return {
         "answer": draft,
