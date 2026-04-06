@@ -36,5 +36,10 @@ class GraphState(TypedDict, total=False):
     snippets: list[Snippet]
     citations: list[str]
 
+    # ── Phase 5: tool-calling (reason_and_act node) ────────────
+    tool_calls_made: list[dict]   # [{tool, args, round}, ...]
+    reasoning_rounds: int         # how many reason_and_act rounds ran
+    needs_more_evidence: bool     # LLM wants another gathering round
+
     # ── Errors (accumulated by any node) ─────────────────────────
     errors: list[str]
