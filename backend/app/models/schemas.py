@@ -52,3 +52,40 @@ class RAGAskResponse(BaseModel):
     model: str
     chunks_used: int
     sources: list[str] = []
+
+
+# ── Aggregation (Phase 6) ───────────────────────────────────
+
+
+class Claim(BaseModel):
+    """A single factual claim extracted from a source."""
+    claim: str
+    source_number: int
+    verbatim_quote: str = ""
+
+
+class EvidenceItem(BaseModel):
+    """A piece of evidence with quality assessment."""
+    source_number: int
+    title: str
+    url: str
+    text: str
+    quality_score: float = 0.0        # 0.0–1.0
+    quality_reason: str = ""
+
+
+class ConsensusGroup(BaseModel):
+    """A group of claims that say the same thing (agreement cluster)."""
+    canonical_claim: str
+    supporting_sources: list[int] = []
+    agreement_count: int = 0
+
+
+class AggregationResult(BaseModel):
+    """Full output of the answer aggregation pipeline."""
+    claims: list[Claim] = []
+    evidence: list[EvidenceItem] = []
+    consensus_groups: list[ConsensusGroup] = []
+    disagreements: list[str] = []
+    uncertainties: list[str] = []
+    final_answer: str = ""

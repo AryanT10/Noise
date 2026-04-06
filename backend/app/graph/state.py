@@ -2,7 +2,7 @@
 
 from typing import TypedDict
 
-from app.models.schemas import Source, Snippet
+from app.models.schemas import Source, Snippet, Claim, EvidenceItem, ConsensusGroup
 
 
 class GraphState(TypedDict, total=False):
@@ -40,6 +40,13 @@ class GraphState(TypedDict, total=False):
     tool_calls_made: list[dict]   # [{tool, args, round}, ...]
     reasoning_rounds: int         # how many reason_and_act rounds ran
     needs_more_evidence: bool     # LLM wants another gathering round
+
+    # ── Phase 6: answer aggregation ──────────────────────────────
+    claims: list[Claim]
+    ranked_evidence: list[EvidenceItem]
+    consensus_groups: list[ConsensusGroup]
+    disagreements: list[str]
+    uncertainties: list[str]
 
     # ── Errors (accumulated by any node) ─────────────────────────
     errors: list[str]

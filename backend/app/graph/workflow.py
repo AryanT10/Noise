@@ -7,6 +7,7 @@ from app.graph.nodes import (
     reason_and_act,
     filter_evidence,
     synthesize_answer,
+    aggregate_answer,
     format_response,
 )
 from app.graph.state import GraphState
@@ -26,7 +27,7 @@ def _after_reasoning(state: GraphState) -> str:
 def _has_evidence(state: GraphState) -> str:
     """Route after filter_evidence: skip synthesis if no relevant evidence."""
     if state.get("filtered_evidence"):
-        return "synthesize_answer"
+        return "aggregate_answer"
     return "format_response"
 
 
@@ -39,7 +40,11 @@ def build_graph() -> StateGraph:
                                     └── (needs more) ┘
                                          │ (has docs)
                                          ↓
-                                  filter_evidence → synthesize_answer → format_response → END
+                                  filter_evidence → aggregate_answer → format_response → END
+
+    Phase 6: aggregate_answer replaces the simpler synthesize_answer.  It runs
+    the full claim-extraction → evidence-ranking → consensus → final-writer
+    pipeline, falling back to synthesize_answer on error.
     """
     graph = StateGraph(GraphState)
 
@@ -47,7 +52,7 @@ def build_graph() -> StateGraph:
     graph.add_node("analyze_question", analyze_question)
     graph.add_node("reason_and_act", reason_and_act)
     graph.add_node("filter_evidence", filter_evidence)
-    graph.add_node("synthesize_answer", synthesize_answer)
+    graph.add_node("aggregate_answer", aggregate_answer)
     graph.add_node("format_response", format_response)
 
     # ── Add edges ────────────────────────────────────────────
@@ -65,14 +70,14 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Conditional: if evidence exists → synthesize; otherwise → format
+    # Conditional: if evidence exists → aggregate; otherwise → format
     graph.add_conditional_edges(
         "filter_evidence",
         _has_evidence,
-        {"synthesize_answer": "synthesize_answer", "format_response": "format_response"},
+        {"aggregate_answer": "aggregate_answer", "format_response": "format_response"},
     )
 
-    graph.add_edge("synthesize_answer", "format_response")
+    graph.add_edge("aggregate_answer", "format_response")
     graph.add_edge("format_response", END)
 
     return graph.compile()
