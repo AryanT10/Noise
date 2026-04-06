@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
 from app.chains.llm import _resolve_model
-from app.chains.pipeline import run_pipeline, run_rag_pipeline
+from app.chains.pipeline import run_rag_pipeline
 from app.config import settings
+from app.graph.workflow import run_graph
 from app.logging import logger
 from app.models.schemas import (
     AskRequest,
@@ -38,7 +39,7 @@ async def ask(request: AskRequest):
         )
 
     logger.info("Received question: %s", request.question[:80])
-    result = await run_pipeline(request.question)
+    result = await run_graph(request.question)
     return AskResponse(
         answer=result.answer,
         model=_resolve_model(),
