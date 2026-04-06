@@ -51,7 +51,7 @@ async def test_ask_pipeline_returns_sources(monkeypatch):
     async def mock_pipeline(question: str) -> PipelineResult:
         return fake_result
 
-    monkeypatch.setattr("app.api.routes.run_pipeline", mock_pipeline)
+    monkeypatch.setattr("app.api.routes.run_graph", mock_pipeline)
     monkeypatch.setattr("app.config.settings.groq_api_key", "test-key")
     monkeypatch.setattr("app.config.settings.llm_provider", "groq")
     monkeypatch.setattr("app.config.settings.serper_api_key", "test-key")
