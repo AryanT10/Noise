@@ -14,6 +14,12 @@ from app.tools.definitions import REASONING_TOOLS
 from app.tools.scraper import extract_page_text
 from app.tools.search import web_search
 
+from app.aggregation.source_reader import read_sources
+from app.aggregation.claim_extractor import extract_claims
+from app.aggregation.evidence_ranker import rank_evidence
+from app.aggregation.consensus_builder import build_consensus
+from app.aggregation.final_writer import write_final_answer
+
 NUM_SEARCH_RESULTS = 5
 NUM_PAGES_TO_SCRAPE = 3
 MAX_REASONING_ROUNDS = 2
@@ -471,3 +477,72 @@ async def format_response(state: GraphState) -> dict:
         "citations": citation_markers,
         "errors": state.get("errors", []),
     }
+
+
+# ── Phase 6: answer aggregation node ────────────────────────
+
+
+async def aggregate_answer(state: GraphState) -> dict:
+    """Run the full aggregation pipeline: read → extract → rank → consensus → write.
+
+    Replaces the simpler synthesize_answer when the graph has enough evidence.
+    """
+    evidence_dicts = state.get("filtered_evidence", [])
+    question = state["question"]
+    errors = list(state.get("errors", []))
+
+    logger.info("Node [aggregate_answer]: %d evidence pieces", len(evidence_dicts))
+
+    if not evidence_dicts:
+        return {
+            "draft_answer": "I couldn't find enough relevant information to answer your question.",
+            "claims": [],
+            "ranked_evidence": [],
+            "consensus_groups": [],
+            "disagreements": [],
+            "uncertainties": [],
+            "errors": errors,
+        }
+
+    try:
+        # Step 1 — normalise sources
+        evidence_items = read_sources(evidence_dicts)
+
+        # Step 2 — extract claims from each source
+        claims = await extract_claims(question, evidence_items)
+
+        # Step 3 — rank evidence by quality
+        ranked = await rank_evidence(question, evidence_items)
+
+        # Step 4 — build consensus, find disagreements & uncertainties
+        groups, disagreements, uncertainties = await build_consensus(
+            question, claims
+        )
+
+        # Step 5 — write the final aggregated judgment
+        answer = await write_final_answer(
+            question, groups, disagreements, uncertainties, ranked
+        )
+
+        logger.info(
+            "aggregate_answer: %d claims, %d groups, %d disagreements",
+            len(claims),
+            len(groups),
+            len(disagreements),
+        )
+
+        return {
+            "draft_answer": answer,
+            "claims": claims,
+            "ranked_evidence": ranked,
+            "consensus_groups": groups,
+            "disagreements": disagreements,
+            "uncertainties": uncertainties,
+            "errors": errors,
+        }
+
+    except Exception as exc:
+        logger.error("aggregate_answer failed — falling back to synthesize: %s", exc)
+        errors.append(f"aggregate_answer: {exc}")
+        # Fall back to the simpler synthesize logic
+        return await synthesize_answer({**state, "errors": errors})
