@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AskRequest(BaseModel):
@@ -89,3 +89,86 @@ class AggregationResult(BaseModel):
     disagreements: list[str] = []
     uncertainties: list[str] = []
     final_answer: str = ""
+
+
+# ── Phase 7: Structured LLM output schemas ──────────────────
+
+
+class SearchQueryGeneration(BaseModel):
+    """Structured output for search query planning."""
+    queries: list[str] = Field(
+        description="1–3 concise web search queries to help answer the user question."
+    )
+
+
+class ExtractedClaim(BaseModel):
+    """A single claim extracted by the LLM from a source."""
+    claim: str = Field(description="A one-sentence factual statement.")
+    verbatim_quote: str = Field(
+        default="",
+        description="The closest verbatim phrase from the source.",
+    )
+
+
+class ExtractedClaimList(BaseModel):
+    """Structured output for claim extraction from a single source."""
+    claims: list[ExtractedClaim] = Field(
+        default_factory=list,
+        description="All distinct factual claims relevant to the question.",
+    )
+
+
+class SourceScore(BaseModel):
+    """Quality score for a single source."""
+    source_number: int
+    quality_score: float = Field(
+        ge=0.0, le=1.0,
+        description="Quality/relevance score from 0.0 to 1.0.",
+    )
+    quality_reason: str = Field(
+        default="",
+        description="Short explanation for the score.",
+    )
+
+
+class EvidenceScoreList(BaseModel):
+    """Structured output for evidence ranking."""
+    scores: list[SourceScore] = Field(
+        description="Quality scores for each source.",
+    )
+
+
+class ConsensusResult(BaseModel):
+    """Structured output for consensus analysis."""
+    consensus_groups: list[ConsensusGroup] = Field(
+        default_factory=list,
+        description="Groups of claims that express the same fact.",
+    )
+    disagreements: list[str] = Field(
+        default_factory=list,
+        description="Descriptions of contradictions between sources.",
+    )
+    uncertainties: list[str] = Field(
+        default_factory=list,
+        description="Aspects that are unclear or speculative.",
+    )
+
+
+class RelevantSourceNumbers(BaseModel):
+    """Structured output for evidence filtering."""
+    source_numbers: list[int] = Field(
+        default_factory=list,
+        description="Numbers of sources relevant to the question. Empty if none are relevant.",
+    )
+
+
+class AggregatedAnswer(BaseModel):
+    """Full structured response from the aggregation pipeline."""
+    answer: str = Field(description="The final aggregated judgment with inline citations.")
+    claims: list[Claim] = Field(default_factory=list)
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    consensus_groups: list[ConsensusGroup] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    sources: list[Source] = Field(default_factory=list)
+    snippets: list[Snippet] = Field(default_factory=list)

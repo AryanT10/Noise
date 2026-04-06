@@ -6,10 +6,10 @@ import re as _re
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.chains.llm import get_llm
+from app.chains.llm import get_llm, get_structured_llm
 from app.graph.state import GraphState
 from app.logging import logger
-from app.models.schemas import Source, Snippet
+from app.models.schemas import Source, Snippet, SearchQueryGeneration, RelevantSourceNumbers
 from app.tools.definitions import REASONING_TOOLS
 from app.tools.scraper import extract_page_text
 from app.tools.search import web_search
@@ -32,8 +32,7 @@ _ANALYZE_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             (
                 "You are a search-query planner. Given a user question, produce 1–3 "
-                "concise web search queries that would help answer the question.\n\n"
-                "Return ONLY the queries, one per line. No numbering, no commentary."
+                "concise web search queries that would help answer the question."
             ),
         ),
         ("human", "{question}"),
@@ -46,15 +45,13 @@ _FILTER_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             (
                 "You are a relevance filter. Given a user question and a set of source "
-                "excerpts, return ONLY the numbers of sources that are relevant to "
-                "answering the question.\n\n"
-                "Return a comma-separated list of source numbers (e.g. '1,3,4'). "
-                "If none are relevant, return 'NONE'."
+                "excerpts, identify which sources are relevant to answering the question.\n\n"
+                "Return the numbers of relevant sources. If none are relevant, return an empty list."
             ),
         ),
         (
             "human",
-            "Question: {question}\n\nSources:\n{sources_block}\n\nRelevant source numbers:",
+            "Question: {question}\n\nSources:\n{sources_block}\n\nWhich sources are relevant?",
         ),
     ]
 )
@@ -112,10 +109,10 @@ async def analyze_question(state: GraphState) -> dict:
     logger.info("Node [analyze_question]: %s", question[:80])
 
     try:
-        llm = get_llm()
+        llm = get_structured_llm(SearchQueryGeneration)
         chain = _ANALYZE_PROMPT | llm
-        response = await chain.ainvoke({"question": question})
-        queries = [q.strip() for q in response.content.strip().splitlines() if q.strip()]
+        result: SearchQueryGeneration = await chain.ainvoke({"question": question})
+        queries = [q.strip() for q in result.queries if q.strip()]
 
         if not queries:
             queries = [question]
@@ -369,24 +366,15 @@ async def filter_evidence(state: GraphState) -> dict:
     sources_block = "\n\n".join(parts)
 
     try:
-        llm = get_llm()
+        llm = get_structured_llm(RelevantSourceNumbers)
         chain = _FILTER_PROMPT | llm
-        response = await chain.ainvoke(
+        result: RelevantSourceNumbers = await chain.ainvoke(
             {"question": question, "sources_block": sources_block}
         )
 
-        raw = response.content.strip()
-        if raw.upper() == "NONE":
-            relevant_nums = []
-        else:
-            relevant_nums = []
-            for token in raw.replace(" ", "").split(","):
-                try:
-                    n = int(token)
-                    if 1 <= n <= len(docs):
-                        relevant_nums.append(n)
-                except ValueError:
-                    continue
+        relevant_nums = [
+            n for n in result.source_numbers if 1 <= n <= len(docs)
+        ]
 
         # If LLM returned nothing useful, keep all docs
         if not relevant_nums:

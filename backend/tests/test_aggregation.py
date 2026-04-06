@@ -17,9 +17,16 @@ from app.graph.nodes import aggregate_answer
 from app.graph.workflow import build_graph, run_graph
 from app.models.schemas import (
     Claim,
-    EvidenceItem,
     ConsensusGroup,
+    ConsensusResult,
+    EvidenceItem,
+    EvidenceScoreList,
+    ExtractedClaimList,
+    ExtractedClaim,
     PipelineResult,
+    RelevantSourceNumbers,
+    SearchQueryGeneration,
+    SourceScore,
 )
 
 
@@ -52,6 +59,13 @@ def _fake_llm(content: str):
     return RunnableLambda(fn)
 
 
+def _fake_structured_llm(pydantic_obj):
+    """Return a RunnableLambda that returns a Pydantic model instance (mimics with_structured_output)."""
+    async def fn(messages):
+        return pydantic_obj
+    return RunnableLambda(fn)
+
+
 def _fake_sequential_llm(responses):
     """Return a RunnableLambda that returns different responses per call."""
     call_count = {"n": 0}
@@ -63,6 +77,25 @@ def _fake_sequential_llm(responses):
         if isinstance(resp, dict) and "tool_calls" in resp:
             return AIMessage(content=resp.get("content", ""), tool_calls=resp["tool_calls"])
         return _FakeLLMResponse(resp)
+
+    runnable = RunnableLambda(fn)
+    runnable.bind_tools = lambda tools: runnable
+    return runnable
+
+
+def _fake_sequential_structured_llm(responses):
+    """Return a RunnableLambda that returns different Pydantic / raw responses per call."""
+    call_count = {"n": 0}
+
+    async def fn(messages):
+        idx = min(call_count["n"], len(responses) - 1)
+        call_count["n"] += 1
+        resp = responses[idx]
+        if isinstance(resp, dict) and "tool_calls" in resp:
+            return AIMessage(content=resp.get("content", ""), tool_calls=resp["tool_calls"])
+        if isinstance(resp, str):
+            return _FakeLLMResponse(resp)
+        return resp  # Pydantic object
 
     runnable = RunnableLambda(fn)
     runnable.bind_tools = lambda tools: runnable
@@ -95,14 +128,14 @@ def test_read_sources_empty():
 
 @pytest.mark.asyncio
 async def test_extract_claims_basic():
-    llm_response = json.dumps([
-        {"claim": "Coffee contains antioxidants", "verbatim_quote": "contains antioxidants"},
-        {"claim": "Coffee may reduce disease risk", "verbatim_quote": "reduce risk of disease"},
+    fake_result = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="Coffee contains antioxidants", verbatim_quote="contains antioxidants"),
+        ExtractedClaim(claim="Coffee may reduce disease risk", verbatim_quote="reduce risk of disease"),
     ])
 
     evidence = [EvidenceItem(source_number=1, title="T", url="u", text="text")]
 
-    with patch("app.aggregation.claim_extractor.get_llm", return_value=_fake_llm(llm_response)):
+    with patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         claims = await extract_claims("Is coffee healthy?", evidence)
 
     assert len(claims) == 2
@@ -112,11 +145,14 @@ async def test_extract_claims_basic():
 
 @pytest.mark.asyncio
 async def test_extract_claims_handles_markdown_fences():
-    llm_response = '```json\n[{"claim": "A claim", "verbatim_quote": "quote"}]\n```'
+    """Structured output shouldn't need markdown fences, but verify single claim works."""
+    fake_result = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="A claim", verbatim_quote="quote"),
+    ])
 
     evidence = [EvidenceItem(source_number=1, title="T", url="u", text="text")]
 
-    with patch("app.aggregation.claim_extractor.get_llm", return_value=_fake_llm(llm_response)):
+    with patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         claims = await extract_claims("Q?", evidence)
 
     assert len(claims) == 1
@@ -126,7 +162,7 @@ async def test_extract_claims_handles_markdown_fences():
 async def test_extract_claims_handles_llm_error():
     evidence = [EvidenceItem(source_number=1, title="T", url="u", text="text")]
 
-    with patch("app.aggregation.claim_extractor.get_llm", side_effect=Exception("LLM down")):
+    with patch("app.aggregation.claim_extractor.get_structured_llm", side_effect=Exception("LLM down")):
         claims = await extract_claims("Q?", evidence)
 
     assert claims == []
@@ -143,10 +179,10 @@ async def test_extract_claims_empty_evidence():
 
 @pytest.mark.asyncio
 async def test_rank_evidence_scores_and_sorts():
-    llm_response = json.dumps([
-        {"source_number": 1, "quality_score": 0.6, "quality_reason": "decent"},
-        {"source_number": 2, "quality_score": 0.9, "quality_reason": "authoritative"},
-        {"source_number": 3, "quality_score": 0.4, "quality_reason": "vague"},
+    fake_result = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.6, quality_reason="decent"),
+        SourceScore(source_number=2, quality_score=0.9, quality_reason="authoritative"),
+        SourceScore(source_number=3, quality_score=0.4, quality_reason="vague"),
     ])
 
     evidence = [
@@ -155,7 +191,7 @@ async def test_rank_evidence_scores_and_sorts():
         EvidenceItem(source_number=3, title="C", url="u3", text="t3"),
     ]
 
-    with patch("app.aggregation.evidence_ranker.get_llm", return_value=_fake_llm(llm_response)):
+    with patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         ranked = await rank_evidence("Q?", evidence)
 
     assert ranked[0].source_number == 2  # highest score first
@@ -165,9 +201,10 @@ async def test_rank_evidence_scores_and_sorts():
 
 @pytest.mark.asyncio
 async def test_rank_evidence_clamps_scores():
-    llm_response = json.dumps([
-        {"source_number": 1, "quality_score": 1.5, "quality_reason": "over"},
-        {"source_number": 2, "quality_score": -0.3, "quality_reason": "under"},
+    """Pydantic Field(ge=0, le=1) handles clamping; test that valid boundary values work."""
+    fake_result = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=1.0, quality_reason="max"),
+        SourceScore(source_number=2, quality_score=0.0, quality_reason="min"),
     ])
 
     evidence = [
@@ -175,7 +212,7 @@ async def test_rank_evidence_clamps_scores():
         EvidenceItem(source_number=2, title="B", url="u2", text="t2"),
     ]
 
-    with patch("app.aggregation.evidence_ranker.get_llm", return_value=_fake_llm(llm_response)):
+    with patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         ranked = await rank_evidence("Q?", evidence)
 
     assert ranked[0].quality_score == 1.0
@@ -186,7 +223,7 @@ async def test_rank_evidence_clamps_scores():
 async def test_rank_evidence_defaults_on_failure():
     evidence = [EvidenceItem(source_number=1, title="A", url="u", text="t")]
 
-    with patch("app.aggregation.evidence_ranker.get_llm", side_effect=Exception("down")):
+    with patch("app.aggregation.evidence_ranker.get_structured_llm", side_effect=Exception("down")):
         ranked = await rank_evidence("Q?", evidence)
 
     assert len(ranked) == 1
@@ -203,14 +240,14 @@ async def test_rank_evidence_empty():
 
 @pytest.mark.asyncio
 async def test_build_consensus_groups_claims():
-    llm_response = json.dumps({
-        "consensus_groups": [
-            {"canonical_claim": "Coffee has antioxidants", "supporting_sources": [1, 2]},
-            {"canonical_claim": "Excess coffee harms sleep", "supporting_sources": [3]},
+    fake_result = ConsensusResult(
+        consensus_groups=[
+            ConsensusGroup(canonical_claim="Coffee has antioxidants", supporting_sources=[1, 2]),
+            ConsensusGroup(canonical_claim="Excess coffee harms sleep", supporting_sources=[3]),
         ],
-        "disagreements": ["Sources 1/2 say healthy; source 3 warns of harm"],
-        "uncertainties": ["Optimal daily intake unclear"],
-    })
+        disagreements=["Sources 1/2 say healthy; source 3 warns of harm"],
+        uncertainties=["Optimal daily intake unclear"],
+    )
 
     claims = [
         Claim(claim="Coffee has antioxidants", source_number=1),
@@ -218,7 +255,7 @@ async def test_build_consensus_groups_claims():
         Claim(claim="Too much coffee causes anxiety", source_number=3),
     ]
 
-    with patch("app.aggregation.consensus_builder.get_llm", return_value=_fake_llm(llm_response)):
+    with patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         groups, disagree, uncertain = await build_consensus("Q?", claims)
 
     assert len(groups) == 2
@@ -231,7 +268,7 @@ async def test_build_consensus_groups_claims():
 async def test_build_consensus_fallback_on_error():
     claims = [Claim(claim="A", source_number=1), Claim(claim="B", source_number=2)]
 
-    with patch("app.aggregation.consensus_builder.get_llm", side_effect=Exception("down")):
+    with patch("app.aggregation.consensus_builder.get_structured_llm", side_effect=Exception("down")):
         groups, disagree, uncertain = await build_consensus("Q?", claims)
 
     assert len(groups) == 2  # each claim becomes its own group
@@ -275,28 +312,25 @@ async def test_write_final_answer_fallback_on_error():
 @pytest.mark.asyncio
 async def test_aggregate_answer_full_pipeline():
     """The aggregate_answer node runs all five stages end-to-end."""
-    claims_json = json.dumps([{"claim": "C1", "verbatim_quote": "q1"}])
-    scores_json = json.dumps([{"source_number": 1, "quality_score": 0.8, "quality_reason": "good"}])
-    consensus_json = json.dumps({
-        "consensus_groups": [{"canonical_claim": "C1", "supporting_sources": [1]}],
-        "disagreements": [],
-        "uncertainties": [],
-    })
-    final_answer = "Aggregated answer about coffee [1]."
-
-    fake_model = _fake_sequential_llm([
-        claims_json,      # claim_extractor
-        scores_json,      # evidence_ranker
-        consensus_json,   # consensus_builder
-        final_answer,     # final_writer
+    fake_claims = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="C1", verbatim_quote="q1"),
     ])
+    fake_scores = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.8, quality_reason="good"),
+    ])
+    fake_consensus = ConsensusResult(
+        consensus_groups=[ConsensusGroup(canonical_claim="C1", supporting_sources=[1])],
+        disagreements=[],
+        uncertainties=[],
+    )
+    final_answer = "Aggregated answer about coffee [1]."
 
     state = _base_state(filtered_evidence=_sample_evidence_dicts()[:1])
 
-    with patch("app.aggregation.claim_extractor.get_llm", return_value=fake_model), \
-         patch("app.aggregation.evidence_ranker.get_llm", return_value=fake_model), \
-         patch("app.aggregation.consensus_builder.get_llm", return_value=fake_model), \
-         patch("app.aggregation.final_writer.get_llm", return_value=fake_model):
+    with patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_claims)), \
+         patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_scores)), \
+         patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_consensus)), \
+         patch("app.aggregation.final_writer.get_llm", return_value=_fake_llm(final_answer)):
         result = await aggregate_answer(state)
 
     assert "coffee" in result["draft_answer"].lower() or "Aggregated" in result["draft_answer"]
@@ -351,32 +385,48 @@ async def test_run_graph_with_aggregation():
             {"title": "Health.gov", "url": "https://health.gov/c", "snippet": "Coffee info"},
         ]
 
-    # 6 LLM calls: analyze, reason (tool_calls), filter, claims, scores, consensus, final
-    fake_model = _fake_sequential_llm([
-        "Is coffee healthy research",           # analyze_question
-        {                                        # reason_and_act
+    # Structured outputs for the structured-output nodes
+    fake_queries = SearchQueryGeneration(queries=["Is coffee healthy research"])
+    fake_filter = RelevantSourceNumbers(source_numbers=[1])
+    fake_claims = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="Coffee is healthy", verbatim_quote="healthy"),
+    ])
+    fake_scores = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.8, quality_reason="good"),
+    ])
+    fake_consensus = ConsensusResult(
+        consensus_groups=[ConsensusGroup(canonical_claim="Coffee is healthy", supporting_sources=[1])],
+        disagreements=[],
+        uncertainties=[],
+    )
+
+    # reason_and_act still uses get_llm (bind_tools), final_writer still uses get_llm
+    fake_tool_model = _fake_sequential_llm([
+        {  # reason_and_act
             "tool_calls": [
                 {"name": "search_web", "args": {"query": "Is coffee healthy"}, "id": "1"},
             ],
         },
-        "1",                                     # filter_evidence
-        json.dumps([{"claim": "Coffee is healthy", "verbatim_quote": "healthy"}]),  # claims
-        json.dumps([{"source_number": 1, "quality_score": 0.8, "quality_reason": "good"}]),  # ranker
-        json.dumps({                             # consensus
-            "consensus_groups": [{"canonical_claim": "Coffee is healthy", "supporting_sources": [1]}],
-            "disagreements": [],
-            "uncertainties": [],
-        }),
         "Coffee is generally considered healthy based on evidence [1].",  # final_writer
     ])
 
+    # Structured output nodes need separate mocking
+    fake_structured_responses = _fake_sequential_structured_llm([
+        fake_queries,     # analyze_question
+        fake_filter,      # filter_evidence
+        fake_claims,      # claim_extractor
+        fake_scores,      # evidence_ranker
+        fake_consensus,   # consensus_builder
+    ])
+
     with (
-        patch("app.graph.nodes.get_llm", return_value=fake_model),
+        patch("app.graph.nodes.get_structured_llm", return_value=fake_structured_responses),
+        patch("app.graph.nodes.get_llm", return_value=fake_tool_model),
         patch("app.graph.nodes.web_search", side_effect=fake_search),
-        patch("app.aggregation.claim_extractor.get_llm", return_value=fake_model),
-        patch("app.aggregation.evidence_ranker.get_llm", return_value=fake_model),
-        patch("app.aggregation.consensus_builder.get_llm", return_value=fake_model),
-        patch("app.aggregation.final_writer.get_llm", return_value=fake_model),
+        patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_claims)),
+        patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_scores)),
+        patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_consensus)),
+        patch("app.aggregation.final_writer.get_llm", return_value=_fake_llm("Coffee is generally considered healthy based on evidence [1].")),
     ):
         result = await run_graph("Is coffee healthy?")
 

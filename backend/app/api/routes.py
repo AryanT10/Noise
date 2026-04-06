@@ -3,9 +3,10 @@ from fastapi import APIRouter, HTTPException
 from app.chains.llm import _resolve_model
 from app.chains.pipeline import run_rag_pipeline
 from app.config import settings
-from app.graph.workflow import run_graph
+from app.graph.workflow import run_graph, run_graph_full
 from app.logging import logger
 from app.models.schemas import (
+    AggregatedAnswer,
     AskRequest,
     AskResponse,
     IngestRequest,
@@ -46,6 +47,26 @@ async def ask(request: AskRequest):
         sources=result.sources,
         snippets=result.snippets,
     )
+
+
+@router.post("/ask/full", response_model=AggregatedAnswer)
+async def ask_full(request: AskRequest):
+    """Return the full structured aggregation result (claims, evidence, consensus)."""
+    key_attr = _KEY_FOR_PROVIDER.get(settings.llm_provider)
+    if not key_attr or not getattr(settings, key_attr, ""):
+        raise HTTPException(
+            status_code=500,
+            detail=f"API key not configured for provider '{settings.llm_provider}'",
+        )
+
+    if not settings.serper_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SERPER_API_KEY not configured — needed for web search",
+        )
+
+    logger.info("Received full question: %s", request.question[:80])
+    return await run_graph_full(request.question)
 
 
 # ── Phase 3: Retrieval endpoints ────────────────────────────

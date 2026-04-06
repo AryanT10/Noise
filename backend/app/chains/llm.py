@@ -1,5 +1,6 @@
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+from pydantic import BaseModel
 
 from app.config import settings
 from app.logging import logger
@@ -43,6 +44,16 @@ def get_llm() -> BaseChatModel:
         )
 
     raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+def get_structured_llm(schema: type[BaseModel]) -> BaseChatModel:
+    """Return an LLM instance that outputs a validated Pydantic object.
+
+    Uses LangChain's `with_structured_output` feature, which leverages
+    function-calling / tool-use under the hood so the model returns JSON
+    that is automatically parsed and validated against *schema*.
+    """
+    return get_llm().with_structured_output(schema)
 
 
 async def ask_llm(question: str) -> str:

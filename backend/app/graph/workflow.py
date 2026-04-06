@@ -12,7 +12,7 @@ from app.graph.nodes import (
 )
 from app.graph.state import GraphState
 from app.logging import logger
-from app.models.schemas import PipelineResult
+from app.models.schemas import PipelineResult, AggregatedAnswer
 
 
 def _after_reasoning(state: GraphState) -> str:
@@ -98,6 +98,27 @@ async def run_graph(question: str) -> PipelineResult:
 
     return PipelineResult(
         answer=result.get("answer", "No answer generated."),
+        sources=result.get("sources", []),
+        snippets=result.get("snippets", []),
+    )
+
+
+async def run_graph_full(question: str) -> AggregatedAnswer:
+    """Run the graph and return the full structured AggregatedAnswer."""
+    logger.info("Running LangGraph workflow (full) for: %s", question[:80])
+
+    result = await qa_graph.ainvoke({"question": question, "errors": []})
+
+    if result.get("errors"):
+        logger.warning("Graph completed with errors: %s", result["errors"])
+
+    return AggregatedAnswer(
+        answer=result.get("answer", "No answer generated."),
+        claims=result.get("claims", []),
+        evidence=result.get("ranked_evidence", []),
+        consensus_groups=result.get("consensus_groups", []),
+        disagreements=result.get("disagreements", []),
+        uncertainties=result.get("uncertainties", []),
         sources=result.get("sources", []),
         snippets=result.get("snippets", []),
     )

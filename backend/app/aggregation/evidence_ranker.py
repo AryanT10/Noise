@@ -1,12 +1,10 @@
 """evidence_ranker — score each source's quality and sort by relevance."""
 
-import json
-
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.chains.llm import get_llm
+from app.chains.llm import get_structured_llm
 from app.logging import logger
-from app.models.schemas import EvidenceItem
+from app.models.schemas import EvidenceItem, EvidenceScoreList
 
 _RANK_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -19,11 +17,7 @@ _RANK_PROMPT = ChatPromptTemplate.from_messages(
                 "- Directness: does it answer the question?\n"
                 "- Specificity: concrete facts vs vague statements?\n"
                 "- Credibility: authoritative domain, detailed content?\n\n"
-                "Return a JSON array of objects, one per source, each with:\n"
-                '  "source_number": int,\n'
-                '  "quality_score": float (0.0–1.0),\n'
-                '  "quality_reason": short explanation.\n\n'
-                "Return ONLY valid JSON — no markdown fences, no commentary."
+                "Return a score for every source."
             ),
         ),
         (
@@ -48,26 +42,17 @@ async def rank_evidence(
     )
 
     try:
-        llm = get_llm()
+        llm = get_structured_llm(EvidenceScoreList)
         chain = _RANK_PROMPT | llm
-        response = await chain.ainvoke(
+        result: EvidenceScoreList = await chain.ainvoke(
             {"question": question, "sources_block": sources_block}
         )
 
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        scores = json.loads(raw)
-        if not isinstance(scores, list):
-            scores = [scores]
-
         score_map: dict[int, tuple[float, str]] = {}
-        for entry in scores:
-            num = entry.get("source_number")
-            score_map[num] = (
-                max(0.0, min(1.0, float(entry.get("quality_score", 0.5)))),
-                entry.get("quality_reason", ""),
+        for entry in result.scores:
+            score_map[entry.source_number] = (
+                entry.quality_score,
+                entry.quality_reason,
             )
 
         for item in evidence:
@@ -77,7 +62,7 @@ async def rank_evidence(
                 item.quality_score = 0.5
                 item.quality_reason = "Not scored by LLM"
 
-    except (json.JSONDecodeError, Exception) as exc:
+    except Exception as exc:
         logger.warning("evidence_ranker LLM scoring failed: %s — using defaults", exc)
         for item in evidence:
             item.quality_score = 0.5

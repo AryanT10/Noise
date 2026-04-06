@@ -1,12 +1,10 @@
 """consensus_builder — detect agreement/disagreement, merge duplicate claims, flag uncertainty."""
 
-import json
-
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.chains.llm import get_llm
+from app.chains.llm import get_structured_llm
 from app.logging import logger
-from app.models.schemas import Claim, ConsensusGroup
+from app.models.schemas import Claim, ConsensusGroup, ConsensusResult
 
 _CONSENSUS_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -21,12 +19,7 @@ _CONSENSUS_PROMPT = ChatPromptTemplate.from_messages(
                 "2. **Disagreements**: list any pairs of claims that directly contradict "
                 "each other. Describe each disagreement in one sentence.\n"
                 "3. **Uncertainties**: list anything that the sources are unclear or "
-                "speculative about.\n\n"
-                "Return a JSON object with three keys:\n"
-                '  "consensus_groups": [{{"canonical_claim": str, "supporting_sources": [int]}}, ...],\n'
-                '  "disagreements": [str, ...],\n'
-                '  "uncertainties": [str, ...]\n\n'
-                "Return ONLY valid JSON — no markdown fences, no commentary."
+                "speculative about."
             ),
         ),
         (
@@ -53,38 +46,26 @@ async def build_consensus(
     )
 
     try:
-        llm = get_llm()
+        llm = get_structured_llm(ConsensusResult)
         chain = _CONSENSUS_PROMPT | llm
-        response = await chain.ainvoke(
+        result: ConsensusResult = await chain.ainvoke(
             {"question": question, "claims_block": claims_block}
         )
 
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        parsed = json.loads(raw)
-
-        groups = [
-            ConsensusGroup(
-                canonical_claim=g["canonical_claim"],
-                supporting_sources=g.get("supporting_sources", []),
-                agreement_count=len(g.get("supporting_sources", [])),
-            )
-            for g in parsed.get("consensus_groups", [])
-        ]
-        disagreements: list[str] = parsed.get("disagreements", [])
-        uncertainties: list[str] = parsed.get("uncertainties", [])
+        # Backfill agreement_count from supporting_sources length
+        for group in result.consensus_groups:
+            if group.agreement_count == 0:
+                group.agreement_count = len(group.supporting_sources)
 
         logger.info(
             "consensus_builder: %d groups, %d disagreements, %d uncertainties",
-            len(groups),
-            len(disagreements),
-            len(uncertainties),
+            len(result.consensus_groups),
+            len(result.disagreements),
+            len(result.uncertainties),
         )
-        return groups, disagreements, uncertainties
+        return result.consensus_groups, result.disagreements, result.uncertainties
 
-    except (json.JSONDecodeError, Exception) as exc:
+    except Exception as exc:
         logger.warning("consensus_builder failed: %s — returning raw claims", exc)
         # Fallback: each claim becomes its own group
         fallback_groups = [

@@ -16,7 +16,17 @@ from app.graph.nodes import (
     MAX_REASONING_ROUNDS,
 )
 from app.graph.workflow import build_graph, run_graph
-from app.models.schemas import PipelineResult
+from app.models.schemas import (
+    PipelineResult,
+    SearchQueryGeneration,
+    RelevantSourceNumbers,
+    ExtractedClaimList,
+    ExtractedClaim,
+    EvidenceScoreList,
+    SourceScore,
+    ConsensusResult,
+    ConsensusGroup,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -54,6 +64,13 @@ def _fake_tool_llm(tool_calls):
     return llm
 
 
+def _fake_structured_llm(pydantic_obj):
+    """Return a RunnableLambda that returns a Pydantic model instance."""
+    async def fn(messages):
+        return pydantic_obj
+    return RunnableLambda(fn)
+
+
 def _fake_sequential_llm(responses):
     """Return a RunnableLambda that returns different responses per call.
 
@@ -82,7 +99,8 @@ def _fake_sequential_llm(responses):
 
 @pytest.mark.asyncio
 async def test_analyze_question_generates_queries():
-    with patch("app.graph.nodes.get_llm", return_value=_fake_llm("LangGraph overview\nLangGraph tutorial")):
+    fake_result = SearchQueryGeneration(queries=["LangGraph overview", "LangGraph tutorial"])
+    with patch("app.graph.nodes.get_structured_llm", return_value=_fake_structured_llm(fake_result)):
         result = await analyze_question(_base_state())
 
     assert "search_queries" in result
@@ -91,7 +109,7 @@ async def test_analyze_question_generates_queries():
 
 @pytest.mark.asyncio
 async def test_analyze_question_falls_back_on_error():
-    with patch("app.graph.nodes.get_llm", side_effect=Exception("LLM down")):
+    with patch("app.graph.nodes.get_structured_llm", side_effect=Exception("LLM down")):
         result = await analyze_question(_base_state())
 
     assert result["search_queries"] == ["What is LangGraph?"]
@@ -330,7 +348,9 @@ async def test_filter_evidence_keeps_relevant():
         {"title": "Also relevant", "url": "https://c.com", "text": "More info"},
     ]
 
-    with patch("app.graph.nodes.get_llm", return_value=_fake_llm("1,3")):
+    with patch("app.graph.nodes.get_structured_llm", return_value=_fake_structured_llm(
+        RelevantSourceNumbers(source_numbers=[1, 3])
+    )):
         result = await filter_evidence(_base_state(retrieved_docs=docs))
 
     assert len(result["filtered_evidence"]) == 2
@@ -400,19 +420,45 @@ async def test_run_graph_end_to_end():
         ]
 
     fake_model = _fake_sequential_llm([
-        "What is LangGraph framework",  # analyze_question
+        "What is LangGraph framework",  # analyze_question (unused — structured mock below)
         {  # reason_and_act — tool calls
             "tool_calls": [
                 {"name": "search_web", "args": {"query": "What is LangGraph framework"}, "id": "1"},
             ],
         },
-        "1",  # filter_evidence
+        "1",  # filter (unused — structured mock below)
         "LangGraph is a library for building stateful agents [1].",  # synthesize_answer
     ])
 
+    fake_queries = SearchQueryGeneration(queries=["What is LangGraph framework"])
+    fake_filter = RelevantSourceNumbers(source_numbers=[1])
+    fake_claims = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="LangGraph is a framework", verbatim_quote="framework"),
+    ])
+    fake_scores = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.8, quality_reason="good"),
+    ])
+    fake_consensus = ConsensusResult(
+        consensus_groups=[ConsensusGroup(canonical_claim="LangGraph is a framework", supporting_sources=[1])],
+        disagreements=[],
+        uncertainties=[],
+    )
+
+    def structured_side_effect(schema):
+        mapping = {
+            SearchQueryGeneration: _fake_structured_llm(fake_queries),
+            RelevantSourceNumbers: _fake_structured_llm(fake_filter),
+        }
+        return mapping.get(schema, _fake_structured_llm(fake_queries))
+
     with (
+        patch("app.graph.nodes.get_structured_llm", side_effect=structured_side_effect),
         patch("app.graph.nodes.get_llm", return_value=fake_model),
         patch("app.graph.nodes.web_search", side_effect=fake_search),
+        patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_claims)),
+        patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_scores)),
+        patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_consensus)),
+        patch("app.aggregation.final_writer.get_llm", return_value=_fake_llm("LangGraph is a library for building stateful agents [1].")),
     ):
         result = await run_graph("What is LangGraph?")
 
@@ -431,19 +477,45 @@ async def test_run_graph_with_doc_retrieval():
     fake_doc.metadata = {"source": "notes.pdf"}
 
     fake_model = _fake_sequential_llm([
-        "LangGraph architecture",  # analyze_question
+        "LangGraph architecture",  # analyze_question (unused — structured mock below)
         {  # reason_and_act — use internal docs
             "tool_calls": [
                 {"name": "retrieve_documents", "args": {"query": "LangGraph architecture"}, "id": "1"},
             ],
         },
-        "1",  # filter_evidence
+        "1",  # filter_evidence (unused — structured mock below)
         "LangGraph architecture builds on LangChain [1].",  # synthesize_answer
     ])
 
+    fake_queries = SearchQueryGeneration(queries=["LangGraph architecture"])
+    fake_filter = RelevantSourceNumbers(source_numbers=[1])
+    fake_claims = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="LangGraph builds on LangChain", verbatim_quote="LangChain"),
+    ])
+    fake_scores = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.8, quality_reason="good"),
+    ])
+    fake_consensus = ConsensusResult(
+        consensus_groups=[ConsensusGroup(canonical_claim="LangGraph builds on LangChain", supporting_sources=[1])],
+        disagreements=[],
+        uncertainties=[],
+    )
+
+    def structured_side_effect(schema):
+        mapping = {
+            SearchQueryGeneration: _fake_structured_llm(fake_queries),
+            RelevantSourceNumbers: _fake_structured_llm(fake_filter),
+        }
+        return mapping.get(schema, _fake_structured_llm(fake_queries))
+
     with (
+        patch("app.graph.nodes.get_structured_llm", side_effect=structured_side_effect),
         patch("app.graph.nodes.get_llm", return_value=fake_model),
         patch("app.retrieval.store.search", return_value=[fake_doc]),
+        patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_claims)),
+        patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_scores)),
+        patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_consensus)),
+        patch("app.aggregation.final_writer.get_llm", return_value=_fake_llm("LangGraph architecture builds on LangChain [1].")),
     ):
         result = await run_graph("Explain LangGraph architecture")
 
@@ -459,7 +531,7 @@ async def test_run_graph_no_results():
         return []
 
     fake_model = _fake_sequential_llm([
-        "test query",  # analyze_question
+        "test query",  # analyze_question (unused — structured mock below)
         {  # reason_and_act — search returns nothing
             "tool_calls": [
                 {"name": "search_web", "args": {"query": "test query"}, "id": "1"},
@@ -467,7 +539,10 @@ async def test_run_graph_no_results():
         },
     ])
 
+    fake_queries = SearchQueryGeneration(queries=["test query"])
+
     with (
+        patch("app.graph.nodes.get_structured_llm", return_value=_fake_structured_llm(fake_queries)),
         patch("app.graph.nodes.get_llm", return_value=fake_model),
         patch("app.graph.nodes.web_search", side_effect=empty_search),
     ):
@@ -490,7 +565,6 @@ async def test_run_graph_with_more_evidence_loop():
         ]
 
     fake_model = _fake_sequential_llm([
-        "query",  # analyze_question
         {  # reason_and_act round 1 — search + request more
             "tool_calls": [
                 {"name": "search_web", "args": {"query": "query"}, "id": "1"},
@@ -502,13 +576,38 @@ async def test_run_graph_with_more_evidence_loop():
                 {"name": "search_web", "args": {"query": "query refined"}, "id": "3"},
             ],
         },
-        "1,2",  # filter_evidence
-        "Combined answer [1][2].",  # synthesize_answer
     ])
 
+    fake_queries = SearchQueryGeneration(queries=["query"])
+    fake_filter = RelevantSourceNumbers(source_numbers=[1, 2])
+    fake_claims = ExtractedClaimList(claims=[
+        ExtractedClaim(claim="Combined info", verbatim_quote="info"),
+    ])
+    fake_scores = EvidenceScoreList(scores=[
+        SourceScore(source_number=1, quality_score=0.8, quality_reason="good"),
+        SourceScore(source_number=2, quality_score=0.7, quality_reason="decent"),
+    ])
+    fake_consensus = ConsensusResult(
+        consensus_groups=[ConsensusGroup(canonical_claim="Combined info", supporting_sources=[1, 2])],
+        disagreements=[],
+        uncertainties=[],
+    )
+
+    def structured_side_effect(schema):
+        mapping = {
+            SearchQueryGeneration: _fake_structured_llm(fake_queries),
+            RelevantSourceNumbers: _fake_structured_llm(fake_filter),
+        }
+        return mapping.get(schema, _fake_structured_llm(fake_queries))
+
     with (
+        patch("app.graph.nodes.get_structured_llm", side_effect=structured_side_effect),
         patch("app.graph.nodes.get_llm", return_value=fake_model),
         patch("app.graph.nodes.web_search", side_effect=fake_search),
+        patch("app.aggregation.claim_extractor.get_structured_llm", return_value=_fake_structured_llm(fake_claims)),
+        patch("app.aggregation.evidence_ranker.get_structured_llm", return_value=_fake_structured_llm(fake_scores)),
+        patch("app.aggregation.consensus_builder.get_structured_llm", return_value=_fake_structured_llm(fake_consensus)),
+        patch("app.aggregation.final_writer.get_llm", return_value=_fake_llm("Combined answer [1][2].")),
     ):
         result = await run_graph("Multi-round question?")
 
