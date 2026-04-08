@@ -13,6 +13,7 @@ from app.models.schemas import Source, Snippet, SearchQueryGeneration, RelevantS
 from app.tools.definitions import REASONING_TOOLS
 from app.tools.scraper import extract_page_text
 from app.tools.search import web_search
+from app.observability.tracing import traced_node
 
 from app.aggregation.source_reader import read_sources
 from app.aggregation.claim_extractor import extract_claims
@@ -103,6 +104,7 @@ _REASON_SYSTEM = (
 # ── Node functions ───────────────────────────────────────────
 
 
+@traced_node
 async def analyze_question(state: GraphState) -> dict:
     """Analyze the user question and generate search queries."""
     question = state["question"]
@@ -130,6 +132,7 @@ async def analyze_question(state: GraphState) -> dict:
 # ── Phase 5: controlled tool-calling node ────────────────────
 
 
+@traced_node
 async def reason_and_act(state: GraphState) -> dict:
     """Reasoning node — uses LLM tool-calling to decide how to gather evidence.
 
@@ -296,6 +299,7 @@ async def reason_and_act(state: GraphState) -> dict:
         }
 
 
+@traced_node
 async def search_sources(state: GraphState) -> dict:
     """Run web searches for each generated query."""
     queries = state.get("search_queries", [state["question"]])
@@ -320,6 +324,7 @@ async def search_sources(state: GraphState) -> dict:
     return {"search_results": all_results, "errors": errors}
 
 
+@traced_node
 async def retrieve_chunks(state: GraphState) -> dict:
     """Scrape the top pages to get full text content."""
     search_results = state.get("search_results", [])
@@ -350,6 +355,7 @@ async def retrieve_chunks(state: GraphState) -> dict:
     return {"retrieved_docs": docs, "errors": state.get("errors", [])}
 
 
+@traced_node
 async def filter_evidence(state: GraphState) -> dict:
     """Use the LLM to filter retrieved docs for relevance."""
     docs = state.get("retrieved_docs", [])
@@ -405,6 +411,7 @@ async def filter_evidence(state: GraphState) -> dict:
         }
 
 
+@traced_node
 async def synthesize_answer(state: GraphState) -> dict:
     """Generate a draft answer from filtered evidence."""
     evidence = state.get("filtered_evidence", [])
@@ -439,6 +446,7 @@ async def synthesize_answer(state: GraphState) -> dict:
         }
 
 
+@traced_node
 async def format_response(state: GraphState) -> dict:
     """Pack the final response into the output shape."""
     logger.info("Node [format_response]")
@@ -470,6 +478,7 @@ async def format_response(state: GraphState) -> dict:
 # ── Phase 6: answer aggregation node ────────────────────────
 
 
+@traced_node
 async def aggregate_answer(state: GraphState) -> dict:
     """Run the full aggregation pipeline: read → extract → rank → consensus → write.
 

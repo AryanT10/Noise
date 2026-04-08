@@ -13,6 +13,14 @@ from app.graph.nodes import (
 from app.graph.state import GraphState
 from app.logging import logger
 from app.models.schemas import PipelineResult, AggregatedAnswer
+from app.observability.tracing import (
+    setup_langsmith,
+    set_current_run_id,
+)
+from app.observability.trace_store import trace_store
+
+# Initialise LangSmith tracing on import (no-op if key not set)
+_langsmith_enabled = setup_langsmith()
 
 
 def _after_reasoning(state: GraphState) -> str:
@@ -91,34 +99,58 @@ async def run_graph(question: str) -> PipelineResult:
     """Run the full LangGraph workflow for a single question."""
     logger.info("Running LangGraph workflow for: %s", question[:80])
 
-    result = await qa_graph.ainvoke({"question": question, "errors": []})
+    run_id = trace_store.start_run(question)
+    set_current_run_id(run_id)
 
-    if result.get("errors"):
-        logger.warning("Graph completed with errors: %s", result["errors"])
+    try:
+        result = await qa_graph.ainvoke({"question": question, "errors": []})
 
-    return PipelineResult(
-        answer=result.get("answer", "No answer generated."),
-        sources=result.get("sources", []),
-        snippets=result.get("snippets", []),
-    )
+        if result.get("errors"):
+            logger.warning("Graph completed with errors: %s", result["errors"])
+
+        trace_store.finish_run(run_id, result)
+
+        return PipelineResult(
+            answer=result.get("answer", "No answer generated."),
+            sources=result.get("sources", []),
+            snippets=result.get("snippets", []),
+            run_id=run_id,
+        )
+    except Exception as exc:
+        trace_store.finish_run(run_id, {"error": str(exc)})
+        raise
+    finally:
+        set_current_run_id(None)
 
 
 async def run_graph_full(question: str) -> AggregatedAnswer:
     """Run the graph and return the full structured AggregatedAnswer."""
     logger.info("Running LangGraph workflow (full) for: %s", question[:80])
 
-    result = await qa_graph.ainvoke({"question": question, "errors": []})
+    run_id = trace_store.start_run(question)
+    set_current_run_id(run_id)
 
-    if result.get("errors"):
-        logger.warning("Graph completed with errors: %s", result["errors"])
+    try:
+        result = await qa_graph.ainvoke({"question": question, "errors": []})
 
-    return AggregatedAnswer(
-        answer=result.get("answer", "No answer generated."),
-        claims=result.get("claims", []),
-        evidence=result.get("ranked_evidence", []),
-        consensus_groups=result.get("consensus_groups", []),
-        disagreements=result.get("disagreements", []),
-        uncertainties=result.get("uncertainties", []),
-        sources=result.get("sources", []),
-        snippets=result.get("snippets", []),
-    )
+        if result.get("errors"):
+            logger.warning("Graph completed with errors: %s", result["errors"])
+
+        trace_store.finish_run(run_id, result)
+
+        return AggregatedAnswer(
+            answer=result.get("answer", "No answer generated."),
+            claims=result.get("claims", []),
+            evidence=result.get("ranked_evidence", []),
+            consensus_groups=result.get("consensus_groups", []),
+            disagreements=result.get("disagreements", []),
+            uncertainties=result.get("uncertainties", []),
+            sources=result.get("sources", []),
+            snippets=result.get("snippets", []),
+            run_id=run_id,
+        )
+    except Exception as exc:
+        trace_store.finish_run(run_id, {"error": str(exc)})
+        raise
+    finally:
+        set_current_run_id(None)

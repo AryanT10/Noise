@@ -14,6 +14,8 @@ from app.models.schemas import (
     RAGAskRequest,
     RAGAskResponse,
 )
+from app.observability.trace_store import trace_store
+from app.observability.tracing import get_langsmith_url
 
 router = APIRouter()
 
@@ -46,6 +48,7 @@ async def ask(request: AskRequest):
         model=_resolve_model(),
         sources=result.sources,
         snippets=result.snippets,
+        run_id=result.run_id,
     )
 
 
@@ -117,3 +120,37 @@ async def clear_store():
 
     _clear()
     return {"status": "cleared"}
+
+
+# ── Phase 8: Observability / debug endpoints ─────────────────
+
+
+@router.get("/traces")
+async def list_traces(limit: int = 20):
+    """List recent run traces (newest first)."""
+    runs = trace_store.list_runs(limit=min(limit, 100))
+    langsmith_url = get_langsmith_url()
+    return {"runs": runs, "langsmith_url": langsmith_url}
+
+
+@router.get("/traces/{run_id}")
+async def get_trace(run_id: str):
+    """Get detailed trace for a specific run (node timing, keys, errors)."""
+    detail = trace_store.get_run_detail(run_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return detail
+
+
+@router.get("/traces/{run_id}/nodes/{node_name}")
+async def get_node_trace(run_id: str, node_name: str):
+    """Get full input/output for a specific node in a run."""
+    entries = trace_store.get_node_detail(run_id, node_name)
+    if entries is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if not entries:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node '{node_name}' not found in run {run_id}",
+        )
+    return {"run_id": run_id, "node": node_name, "executions": entries}
