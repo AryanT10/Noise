@@ -154,3 +154,66 @@ async def get_node_trace(run_id: str, node_name: str):
             detail=f"Node '{node_name}' not found in run {run_id}",
         )
     return {"run_id": run_id, "node": node_name, "executions": entries}
+
+
+# ── Phase 9: Evaluation endpoints ────────────────────────────
+
+
+@router.get("/eval/dataset")
+async def list_eval_dataset():
+    """Return the built-in evaluation test cases."""
+    from app.evaluation.dataset import EVAL_DATASET
+
+    return {"cases": [c.model_dump() for c in EVAL_DATASET]}
+
+
+@router.post("/eval/run")
+async def run_evaluation(
+    label: str = "",
+    case_ids: list[str] | None = None,
+    use_llm_judge: bool = True,
+):
+    """Run the eval suite (or a subset) and return the report.
+
+    Query params:
+      - label: human name for this run (e.g. "baseline")
+      - case_ids: JSON list of case IDs to run; omit for all
+      - use_llm_judge: set False for fast deterministic-only scoring
+    """
+    from app.evaluation.runner import run_eval
+
+    report = await run_eval(
+        label=label,
+        case_ids=case_ids,
+        use_llm_judge=use_llm_judge,
+    )
+    return report.model_dump()
+
+
+@router.post("/eval/compare")
+async def compare_evaluations(
+    baseline_label: str = "baseline",
+    candidate_label: str = "candidate",
+    baseline_case_ids: list[str] | None = None,
+    candidate_case_ids: list[str] | None = None,
+    use_llm_judge: bool = True,
+):
+    """Run two eval suites back-to-back and return a comparison report."""
+    from app.evaluation.runner import compare_reports, run_eval
+
+    baseline = await run_eval(
+        label=baseline_label,
+        case_ids=baseline_case_ids,
+        use_llm_judge=use_llm_judge,
+    )
+    candidate = await run_eval(
+        label=candidate_label,
+        case_ids=candidate_case_ids,
+        use_llm_judge=use_llm_judge,
+    )
+    comparison = compare_reports(baseline, candidate)
+    return {
+        "baseline": baseline.model_dump(),
+        "candidate": candidate.model_dump(),
+        "comparison": comparison.model_dump(),
+    }
