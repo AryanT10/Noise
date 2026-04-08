@@ -20,6 +20,7 @@ class PipelineResult(BaseModel):
     answer: str
     sources: list[Source]
     snippets: list[Snippet]
+    run_id: str = ""
 
 
 class AskResponse(BaseModel):
@@ -27,6 +28,7 @@ class AskResponse(BaseModel):
     model: str
     sources: list[Source] = []
     snippets: list[Snippet] = []
+    run_id: str = ""
 
 
 # ── Retrieval (Phase 3) ─────────────────────────────────────
@@ -172,3 +174,4 @@ class AggregatedAnswer(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
     snippets: list[Snippet] = Field(default_factory=list)
+    run_id: str = ""

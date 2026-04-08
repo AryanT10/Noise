@@ -22,5 +22,10 @@ class Settings(BaseSettings):
     # Retrieval / embeddings — defaults to llm_provider if empty
     embedding_provider: str = ""
 
+    # Phase 8: LangSmith observability
+    langsmith_api_key: str = ""
+    langsmith_project: str = "noise"
+    langsmith_endpoint: str = ""  # defaults to https://smith.langchain.com
+
 
 settings = Settings()
